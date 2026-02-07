@@ -4,6 +4,7 @@ from supabase import create_client, Client
 from io import BytesIO
 
 # --- DB CONNECTION ---
+# These must be set in your Streamlit Cloud Secrets
 URL = st.secrets["SUPABASE_URL"]
 KEY = st.secrets["SUPABASE_KEY"]
 supabase: Client = create_client(URL, KEY)
@@ -27,7 +28,9 @@ if not st.session_state.logged_in:
         try:
             res = supabase.table("users").select("*").eq("username", u).eq("password", p).execute()
             if res.data:
-                st.session_state.logged_in, st.session_state.username, st.session_state.role = True, u, res.data[0]['role']
+                st.session_state.logged_in = True
+                st.session_state.username = u
+                st.session_state.role = res.data[0]['role']
                 st.rerun()
             else:
                 st.error("Invalid credentials")
@@ -40,7 +43,12 @@ else:
         st.session_state.logged_in = False
         st.rerun()
 
-    tab1, tab2 = st.tabs(["Upload & Process", "Admin Records"]) if st.session_state.role == "admin" else ([st.container()], None)
+    # --- TAB STABILIZATION LOGIC ---
+    if st.session_state.role == "admin":
+        tab1, tab2 = st.tabs(["📤 Upload & Process", "📊 Admin Records"])
+    else:
+        tab1 = st.container()
+        tab2 = None
 
     # --- TAB 1: UPLOAD & PROCESS ---
     with tab1:
@@ -51,9 +59,11 @@ else:
             df = pd.read_excel(uploaded_file)
             df.columns = [str(c).strip() for c in df.columns] 
             
+            # Excel-level deduplication
             if 'Trans ID' in df.columns:
                 df = df.drop_duplicates(subset=['Trans ID'])
 
+            # Filter for Funded and Voided Sales
             valid_statuses = ['funded', 'voided']
             main_df = df[(df['Status'].astype(str).str.lower().isin(valid_statuses)) & 
                          (df['Type'].astype(str).str.lower() == 'sale')].copy()
@@ -63,11 +73,19 @@ else:
             else:
                 main_df['Date'] = pd.to_datetime(main_df['Date'])
                 main_df['Month'] = main_df['Date'].dt.to_period('M').astype(str)
+                
+                # Fee Reversal Logic
                 main_df['Fee'] = main_df['Fee'] * -1
-                main_df['Amount'] = main_df.apply(lambda x: x['Amount'] * -1 if str(x['Status']).lower() == 'voided' else x['Amount'], axis=1)
+                
+                # Void Netting Logic
+                main_df['Amount'] = main_df.apply(
+                    lambda x: x['Amount'] * -1 if str(x['Status']).lower() == 'voided' else x['Amount'], axis=1
+                )
+
+                # Taxable Logic: Decimal OR Whole > 4000
                 main_df['is_taxable'] = main_df['Amount'].abs().apply(lambda x: (x % 1 != 0) or (x > 4000))
 
-                st.subheader("📋 Monthly Summary Report")
+                st.subheader("📋 Monthly Summary (Current File)")
                 summary_data = main_df.groupby('Month').apply(lambda x: pd.Series({
                     'Taxable Sales': x[x['is_taxable'] == True]['Amount'].sum(),
                     'Nontaxable Sales': x[x['is_taxable'] == False]['Amount'].sum(),
@@ -94,13 +112,14 @@ else:
                             "is_taxable": bool(row["is_taxable"])
                         })
                     try:
+                        # Upsert prevents duplication on trans_id
                         supabase.table("logs").upsert(rows, on_conflict="trans_id").execute()
                         st.success("Database synchronized successfully!")
                     except Exception as e:
                         st.error(f"Database Error: {e}")
 
     # --- TAB 2: ADMIN RECORDS ---
-    if tab2:
+    if tab2 is not None:
         with tab2:
             st.header("📊 Historical Database Records")
             try:
@@ -121,6 +140,7 @@ else:
                         'Total Fees': x['fee'].sum()
                     }))
 
+                    # YTD Row
                     ytd = pd.DataFrame({
                         'Taxable Sales': [hist_summary['Taxable Sales'].sum()],
                         'Nontaxable Sales': [hist_summary['Nontaxable Sales'].sum()],
@@ -133,13 +153,12 @@ else:
                     final_display = pd.concat([hist_summary, ytd])
                     st.dataframe(final_display.style.format("${:,.2f}"))
 
-                    # --- VISUAL CHART ---
+                    # --- VISUALS ---
                     st.subheader("📊 Sales Tax Liability Trend")
-                    # Prepare chart data (excluding the YTD row)
                     chart_data = hist_summary[['Sales Tax (B)']].copy()
                     st.bar_chart(chart_data)
 
-                    # --- EXPORT BUTTON ---
+                    # --- EXPORT ---
                     csv = final_display.to_csv().encode('utf-8')
                     st.download_button(
                         label="📥 Download Accumulated Report as CSV",
