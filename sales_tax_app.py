@@ -40,7 +40,7 @@ else:
             df = pd.read_excel(uploaded_file)
             df.columns = [str(c).strip() for c in df.columns] 
             
-            # Base Filter: Funded Sales only
+            # Filter: Funded Sales only
             base_filter = (df['Status'].astype(str).str.lower() == 'funded') & \
                           (df['Type'].astype(str).str.lower() == 'sale')
             main_df = df[base_filter].copy()
@@ -50,26 +50,23 @@ else:
             else:
                 main_df['Date'] = pd.to_datetime(main_df['Date'])
                 main_df['Month'] = main_df['Date'].dt.to_period('M').astype(str)
-                main_df['is_decimal'] = main_df['Amount'].apply(lambda x: x % 1 != 0)
-
-                # --- NEW LOGIC DEFINITION ---
-                # Nontaxable = Whole Numbers AND <= 4000
-                nontax_mask = (main_df['is_decimal'] == False) & (main_df['Amount'] <= 4000)
                 
-                # Taxable = (Decimals) OR (Whole Numbers > 4000)
-                tax_mask = (main_df['is_decimal'] == True) | ((main_df['is_decimal'] == False) & (main_df['Amount'] > 4000))
+                # TAXABLE LOGIC: Decimal OR Whole Number > 4000
+                main_df['is_taxable'] = main_df['Amount'].apply(lambda x: (x % 1 != 0) or (x > 4000))
 
-                # --- MONTHLY SUMMARY REPORT ---
+                # --- 1. MONTHLY SUMMARY REPORT ---
                 st.subheader("📋 Monthly Summary Report")
-                
                 summary_data = main_df.groupby('Month').apply(lambda x: pd.Series({
-                    'Total Nontaxable': x[(x['is_decimal'] == False) & (x['Amount'] <= 4000)]['Amount'].sum(),
-                    'Total Taxable': x[(x['is_decimal'] == True) | ((x['is_decimal'] == False) & (x['Amount'] > 4000))]['Amount'].sum(),
-                    'Transaction Count': len(x[(x['is_decimal'] == True) | (x['is_decimal'] == False)]), # All funded sales
+                    'Total Nontaxable': x[x['is_taxable'] == False]['Amount'].sum(),
+                    'Total Taxable': x[x['is_taxable'] == True]['Amount'].sum(),
                     'Grand Total': x['Amount'].sum()
                 })).reset_index().set_index('Month')
-                
-                st.dataframe(summary_data.style.format("${:,.2f}", subset=['Total Nontaxable', 'Total Taxable', 'Grand Total']))
+                st.dataframe(summary_data.style.format("${:,.2f}"))
+
+                # --- 2. MONTHLY FEES SUMMARY ---
+                st.subheader("💳 Monthly Fees Summary")
+                fees_summary = main_df.groupby('Month')['Fee'].sum().reset_index().set_index('Month')
+                st.dataframe(fees_summary.style.format("${:,.2f}"))
 
                 if st.button("Save Records to Database"):
                     rows = []
@@ -83,19 +80,33 @@ else:
                             "status": str(row["Status"]),
                             "amount": float(row["Amount"]),
                             "fee": float(row.get("Fee", 0)),
-                            "is_decimal": bool(row["is_decimal"])
+                            "is_taxable": bool(row["is_taxable"])
                         })
                     supabase.table("logs").insert(rows).execute()
-                    st.success("All funded sale records successfully saved!")
+                    st.success("All data logged successfully!")
 
     if tab2:
         with tab2:
-            st.header("📊 Admin Transaction Log")
+            st.header("📊 Admin Database Records")
             try:
                 res = supabase.table("logs").select("*").order("date_field", desc=True).execute()
                 if res.data:
                     admin_df = pd.DataFrame(res.data)
-                    st.dataframe(admin_df[["trans_id", "date_field", "cardholder_name", "amount", "is_decimal"]])
+                    admin_df['date_field'] = pd.to_datetime(admin_df['date_field'])
+                    admin_df['Month'] = admin_df['date_field'].dt.to_period('M').astype(str)
+
+                    # --- ACCUMULATED DATA BY MONTH ---
+                    st.subheader("📈 Historical Accumulated Monthly Totals")
+                    historical_summary = admin_df.groupby('Month').agg({
+                        'amount': 'sum',
+                        'fee': 'sum',
+                        'id': 'count'
+                    }).rename(columns={'amount': 'Total Sales', 'fee': 'Total Fees', 'id': 'Transaction Count'})
+                    st.dataframe(historical_summary.style.format("${:,.2f}", subset=['Total Sales', 'Total Fees']))
+
+                    # --- DETAILED LOGS ---
+                    st.subheader("📝 Detailed Transaction Logs")
+                    st.dataframe(admin_df[["trans_id", "date_field", "cardholder_name", "amount", "fee", "is_taxable"]])
                 else:
                     st.info("No records found in database.")
             except Exception as e:
