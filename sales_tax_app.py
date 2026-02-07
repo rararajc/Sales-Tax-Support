@@ -9,7 +9,7 @@ supabase: Client = create_client(URL, KEY)
 
 st.set_page_config(page_title="Sales Tax Processor", layout="wide")
 
-# --- LOGIN (Simplified for brevity) ---
+# --- LOGIN LOGIC ---
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
 
@@ -22,6 +22,8 @@ if not st.session_state.logged_in:
         if res.data:
             st.session_state.logged_in, st.session_state.username, st.session_state.role = True, u, res.data[0]['role']
             st.rerun()
+        else:
+            st.error("Invalid credentials")
 else:
     st.sidebar.title(f"User: {st.session_state.username}")
     if st.sidebar.button("Logout"):
@@ -36,9 +38,9 @@ else:
 
         if uploaded_file:
             df = pd.read_excel(uploaded_file)
-            df.columns = [str(c).strip() for c in df.columns] # Clean column names
+            df.columns = [str(c).strip() for c in df.columns] 
             
-            # 1. Basic Filter: Must be "funded" and "Sale"
+            # Base Filter: Funded Sales only
             base_filter = (df['Status'].astype(str).str.lower() == 'funded') & \
                           (df['Type'].astype(str).str.lower() == 'sale')
             main_df = df[base_filter].copy()
@@ -46,67 +48,55 @@ else:
             if main_df.empty:
                 st.warning("No records found matching 'funded' and 'Sale'.")
             else:
-                # 2. Add Helper Columns
                 main_df['Date'] = pd.to_datetime(main_df['Date'])
                 main_df['Month'] = main_df['Date'].dt.to_period('M').astype(str)
                 main_df['is_decimal'] = main_df['Amount'].apply(lambda x: x % 1 != 0)
 
-                # 3. Apply the specific logic
-                # Bucket 1: Decimals (Any amount)
-                decimal_mask = (main_df['is_decimal'] == True)
+                # --- NEW LOGIC DEFINITION ---
+                # Nontaxable = Whole Numbers AND <= 4000
+                nontax_mask = (main_df['is_decimal'] == False) & (main_df['Amount'] <= 4000)
                 
-                # Bucket 2: Whole numbers (Only if <= 4000)
-                whole_mask = (main_df['is_decimal'] == False) & (main_df['Amount'] <= 4000)
+                # Taxable = (Decimals) OR (Whole Numbers > 4000)
+                tax_mask = (main_df['is_decimal'] == True) | ((main_df['is_decimal'] == False) & (main_df['Amount'] > 4000))
 
-                # Combine valid rows for the final report
-                valid_rows = main_df[decimal_mask | whole_mask].copy()
-
-                # 4. Generate Monthly Summary
-                st.subheader("Monthly Summary Report")
-                monthly_summary = valid_rows.groupby('Month').agg(
-                    Total_Decimals=('Amount', lambda x: x[main_df.loc[x.index, 'is_decimal']].sum()),
-                    Total_Whole_Under_4k=('Amount', lambda x: x[~main_df.loc[x.index, 'is_decimal']].sum()),
-                    Count=('Amount', 'count'),
-                    Grand_Total=('Amount', 'sum')
-                )
+                # --- MONTHLY SUMMARY REPORT ---
+                st.subheader("📋 Monthly Summary Report")
                 
-                st.dataframe(monthly_summary.style.format("{:,.2f}"))
+                summary_data = main_df.groupby('Month').apply(lambda x: pd.Series({
+                    'Total Nontaxable': x[(x['is_decimal'] == False) & (x['Amount'] <= 4000)]['Amount'].sum(),
+                    'Total Taxable': x[(x['is_decimal'] == True) | ((x['is_decimal'] == False) & (x['Amount'] > 4000))]['Amount'].sum(),
+                    'Transaction Count': len(x[(x['is_decimal'] == True) | (x['is_decimal'] == False)]), # All funded sales
+                    'Grand Total': x['Amount'].sum()
+                })).reset_index().set_index('Month')
+                
+                st.dataframe(summary_data.style.format("${:,.2f}", subset=['Total Nontaxable', 'Total Taxable', 'Grand Total']))
 
-                # Totals for current file
-                st.divider()
-                st.write(f"### File Totals")
-                st.write(f"✅ **Decimal Sum (All):** ${valid_rows[valid_rows['is_decimal']]['Amount'].sum():,.2f}")
-                st.write(f"✅ **Whole Sum (≤ 4000):** ${valid_rows[~valid_rows['is_decimal']]['Amount'].sum():,.2f}")
-                st.write(f"🎯 **Grand Total:** ${valid_rows['Amount'].sum():,.2f}")
-
-                if st.button("Save Filtered Data to Database"):
+                if st.button("Save Records to Database"):
                     rows = []
-                    for _, row in valid_rows.iterrows():
+                    for _, row in main_df.iterrows():
                         rows.append({
                             "username": st.session_state.username,
-                            "trans_id": str(row["Trans ID"]),
+                            "trans_id": str(row.get("Trans ID", "")),
                             "date_field": row["Date"].strftime('%Y-%m-%d'),
-                            "cardholder_name": str(row["Cardholder Name"]),
+                            "cardholder_name": str(row.get("Cardholder Name", "N/A")),
                             "type": str(row["Type"]),
                             "status": str(row["Status"]),
                             "amount": float(row["Amount"]),
-                            "fee": float(row["Fee"]),
+                            "fee": float(row.get("Fee", 0)),
                             "is_decimal": bool(row["is_decimal"])
                         })
                     supabase.table("logs").insert(rows).execute()
-                    st.success(f"Logged {len(rows)} transactions.")
+                    st.success("All funded sale records successfully saved!")
 
     if tab2:
         with tab2:
             st.header("📊 Admin Transaction Log")
-            res = supabase.table("logs").select("*").order("date_field", desc=True).execute()
-            if res.data:
-                admin_df = pd.DataFrame(res.data)
-                admin_df['date_field'] = pd.to_datetime(admin_df['date_field'])
-                admin_df['Month'] = admin_df['date_field'].dt.to_period('M').astype(str)
-                
-                # Monthly Global View for Admin
-                admin_summary = admin_df.groupby('Month')['amount'].sum()
-                st.bar_chart(admin_summary)
-                
-                st.dataframe(admin_df[["trans_id", "date_field", "cardholder_name", "type", "status", "amount", "fee"]])
+            try:
+                res = supabase.table("logs").select("*").order("date_field", desc=True).execute()
+                if res.data:
+                    admin_df = pd.DataFrame(res.data)
+                    st.dataframe(admin_df[["trans_id", "date_field", "cardholder_name", "amount", "is_decimal"]])
+                else:
+                    st.info("No records found in database.")
+            except Exception as e:
+                st.error(f"Database Error: {e}")
