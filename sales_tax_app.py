@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from supabase import create_client, Client
-from datetime import datetime
+from datetime import datetime, date
 
 # --- DB CONNECTION ---
 URL = st.secrets["SUPABASE_URL"]
@@ -11,9 +11,23 @@ supabase: Client = create_client(URL, KEY)
 st.set_page_config(page_title="Sales Tax Processor Pro", layout="wide")
 
 # --- SIDEBAR SETTINGS ---
-st.sidebar.title("⚙️ Settings")
+st.sidebar.title("⚙️ Global Filters")
+
+# Global Tax Rate
 tax_rate_input = st.sidebar.number_input("Sales Tax Rate (%)", value=10.25, step=0.01, format="%.2f")
 tax_rate = tax_rate_input / 100
+
+st.sidebar.divider()
+
+# Global Date Range
+st.sidebar.subheader("📅 Date Range Filter")
+today = date.today()
+start_of_year = date(today.year, 1, 1)
+date_range = st.sidebar.date_input(
+    "Select Period for Analytics",
+    value=(start_of_year, today),
+    max_value=today
+)
 
 # --- LOGIN LOGIC ---
 if 'logged_in' not in st.session_state:
@@ -43,7 +57,7 @@ else:
         st.rerun()
 
     if st.session_state.role == "admin":
-        tab1, tab2 = st.tabs(["📤 Upload & Process", "📊 Admin Records & Filing"])
+        tab1, tab2 = st.tabs(["📤 Upload & Process", "📊 Admin Records & Analytics"])
     else:
         tab1 = st.container()
         tab2 = None
@@ -55,7 +69,6 @@ else:
 
         if uploaded_file:
             try:
-                # Load data
                 if uploaded_file.name.endswith('.csv'):
                     df = pd.read_csv(uploaded_file, sep=None, engine='python')
                 else:
@@ -63,14 +76,10 @@ else:
                 
                 df.columns = [str(c).strip() for c in df.columns] 
                 
-                # --- DATA CLEANING (Handles Accounting Formats & Currency) ---
                 for col in ['Amount', 'Fee']:
                     if col in df.columns:
-                        # 1. Convert to string and clean whitespace
                         df[col] = df[col].astype(str).str.strip()
-                        # 2. Handle parentheses (46.63) -> -46.63
                         df[col] = df[col].str.replace(r'\((.*)\)', r'-\1', regex=True)
-                        # 3. Remove currency symbols, commas, and convert to float
                         df[col] = (
                             df[col]
                             .str.replace(r'[\$,\s]', '', regex=True)
@@ -86,46 +95,26 @@ else:
                              (df['Type'].astype(str).str.lower() == 'sale')].copy()
 
                 if main_df.empty:
-                    st.warning("No records found matching 'funded/voided' and 'Sale'.")
+                    st.warning("No valid sale records found.")
                 else:
                     main_df['Date'] = pd.to_datetime(main_df['Date'])
                     main_df['Month'] = main_df['Date'].dt.to_period('M').astype(str)
                     main_df['Fee'] = main_df['Fee'] * -1
-                    
-                    # Void Netting Logic
                     main_df['Amount'] = main_df.apply(
                         lambda x: x['Amount'] * -1 if str(x['Status']).lower() == 'voided' else x['Amount'], axis=1
                     )
 
-                    # --- TAXABLE IDENTIFICATION ---
-                    # Taxable = Has decimals OR is whole number > 2000
-                    main_df['is_taxable'] = main_df['Amount'].abs().apply(lambda x: (x % 1 != 0) or (x > 2000))
+                    main_df['is_taxable'] = main_df['Amount'].abs().apply(lambda x: (x % 1 != 0))
                     main_df['Category'] = main_df['is_taxable'].map({True: "Taxable", False: "Nontaxable"})
-                    
-                    # Calculations
-                    main_df['Taxable Sales Before Tax'] = main_df.apply(lambda x: x['Amount'] / (1 + tax_rate) if x['is_taxable'] else 0, axis=1)
-                    main_df['Nontaxable Sales'] = main_df.apply(lambda x: x['Amount'] if not x['is_taxable'] else 0, axis=1)
-                    main_df['Calculated Tax'] = main_df['Taxable Sales Before Tax'] * tax_rate
+                    main_df['Taxable Sales Pre-Tax'] = main_df.apply(lambda x: x['Amount'] / (1 + tax_rate) if x['is_taxable'] else 0, axis=1)
+                    main_df['Calculated Tax'] = main_df['Taxable Sales Pre-Tax'] * tax_rate
 
-                    # --- DISPLAY: ITEMIZED BREAKDOWN ---
-                    st.subheader("🔍 Itemized Tax Identification")
-                    st.write("Review how each transaction was categorized before saving.")
-                    st.dataframe(main_df[['Date', 'Trans ID', 'Amount', 'Category', 'Taxable Sales Before Tax', 'Nontaxable Sales', 'Calculated Tax']].style.format({
-                        'Amount': "${:,.2f}", 'Taxable Sales Before Tax': "${:,.2f}", 'Nontaxable Sales': "${:,.2f}", 'Calculated Tax': "${:,.2f}"
+                    st.subheader("🔍 Upload Preview")
+                    st.dataframe(main_df[['Date', 'Trans ID', 'Cardholder Name', 'Amount', 'Category', 'Calculated Tax']].style.format({
+                        'Amount': "${:,.2f}", 'Calculated Tax': "${:,.2f}"
                     }), use_container_width=True)
 
-                    # --- DISPLAY: MONTHLY SUMMARY ---
-                    st.subheader("📋 Monthly Summary")
-                    summary_data = main_df.groupby('Month').apply(lambda x: pd.Series({
-                        'Taxable Sales (Pre-Tax)': x['Taxable Sales Before Tax'].sum(),
-                        'Nontaxable Sales': x['Nontaxable Sales'].sum(),
-                        'Total Sales (Pre-Tax)': x['Taxable Sales Before Tax'].sum() + x['Nontaxable Sales'].sum(),
-                        'Tax Liability': x['Calculated Tax'].sum(),
-                        'Total Collected': x['Amount'].sum()
-                    }), include_groups=False).reset_index().set_index('Month')
-                    st.dataframe(summary_data.style.format("${:,.2f}"), use_container_width=True)
-
-                    if st.button("🚀 Sync to Database (Upsert)"):
+                    if st.button("🚀 Sync to Database"):
                         rows = []
                         for _, row in main_df.iterrows():
                             rows.append({
@@ -140,64 +129,98 @@ else:
                                 "is_taxable": bool(row["is_taxable"])
                             })
                         try:
-                            # Upsert prevents duplicates by updating existing trans_id matches
                             supabase.table("logs").upsert(rows, on_conflict="trans_id").execute()
-                            st.success("Database synchronized successfully!")
+                            st.success("Database updated!")
                         except Exception as e:
                             st.error(f"Database Error: {e}")
             except Exception as e:
                 st.error(f"File Error: {e}")
 
-    # --- TAB 2: ADMIN RECORDS & FILING ---
+    # --- TAB 2: ADMIN RECORDS & ANALYTICS ---
     if tab2 is not None:
         with tab2:
-            st.header("📊 Historical Database & Filing")
             try:
+                # Fetch all for processing, but filter locally based on sidebar
                 res = supabase.table("logs").select("*").order("date_field", desc=True).execute()
                 if res.data:
-                    admin_df = pd.DataFrame(res.data)
-                    admin_df['date_field'] = pd.to_datetime(admin_df['date_field'])
-                    admin_df['Month'] = admin_df['date_field'].dt.to_period('M').astype(str)
+                    full_df = pd.DataFrame(res.data)
+                    full_df['date_field'] = pd.to_datetime(full_df['date_field'])
                     
-                    # Apply calculations based on DB flag
-                    admin_df['Taxable Sales'] = admin_df.apply(lambda x: x['amount'] / (1 + tax_rate) if x['is_taxable'] else 0, axis=1)
-                    admin_df['Tax Liability'] = admin_df['Taxable Sales'] * tax_rate
+                    # Apply Date Range Filter
+                    if len(date_range) == 2:
+                        sd, ed = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
+                        filtered_period_df = full_df[(full_df['date_field'] >= sd) & (full_df['date_field'] <= ed)].copy()
+                    else:
+                        filtered_period_df = full_df.copy()
 
-                    # --- FILING FORM ---
-                    st.subheader("📅 Mark Month as Filed")
-                    c1, c2, c3 = st.columns(3)
-                    avail_months = sorted(admin_df['Month'].unique(), reverse=True)
-                    target_month = c1.selectbox("Select Month", avail_months)
-                    file_date = c2.date_input("Filing Date", datetime.now())
+                    filtered_period_df['Month'] = filtered_period_df['date_field'].dt.to_period('M').astype(str)
                     
-                    if c3.button("Confirm Filing Status"):
-                        try:
-                            # Updates all rows within that month's date range
-                            supabase.table("logs").update({
-                                "is_filed": True, 
-                                "date_filed": file_date.strftime('%Y-%m-%d')
-                            }).filter("date_field", "gte", f"{target_month}-01")\
-                              .filter("date_field", "lte", f"{target_month}-31").execute()
-                            st.success(f"Records for {target_month} updated!")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Update Error: {e} (Check if 'is_filed' column exists)")
+                    # Calculations
+                    filtered_period_df['Taxable Vol'] = filtered_period_df.apply(lambda x: x['amount'] if x['is_taxable'] else 0, axis=1)
+                    filtered_period_df['Nontaxable Vol'] = filtered_period_df.apply(lambda x: x['amount'] if not x['is_taxable'] else 0, axis=1)
+                    filtered_period_df['Tax Liability'] = (filtered_period_df['Taxable Vol'] / (1 + tax_rate)) * tax_rate
 
+                    # --- KPI CARDS ---
+                    st.header(f"📊 Period Overview ({date_range[0]} to {date_range[1]})")
+                    kpi1, kpi2, kpi3 = st.columns(3)
+                    total_vol = filtered_period_df['amount'].sum()
+                    total_tax = filtered_period_df['Tax Liability'].sum()
+                    effective_rate = (total_tax / total_vol * 100) if total_vol != 0 else 0
+                    
+                    kpi1.metric("Total Sales Volume", f"${total_vol:,.2f}")
+                    kpi2.metric("Total Tax Liability", f"${total_tax:,.2f}")
+                    kpi3.metric("Effective Tax Rate", f"{effective_rate:.2f}%")
+
+                    # --- ANALYTICS ---
                     st.divider()
+                    col_chart1, col_chart2 = st.columns(2)
+                    
+                    with col_chart1:
+                        st.subheader("📉 Volume Breakdown")
+                        chart_data = filtered_period_df.groupby('Month')[['Taxable Vol', 'Nontaxable Vol']].sum()
+                        st.bar_chart(chart_data)
 
-                    # --- FINANCIAL SUMMARY ---
-                    st.subheader("📈 Financial Overview")
-                    hist_summary = admin_df.groupby('Month').apply(lambda x: pd.Series({
-                        'Total Amount': x['amount'].sum(),
+                    with col_chart2:
+                        st.subheader("📈 Tax Rate Trend (%)")
+                        trend_data = filtered_period_df.groupby('Month').apply(lambda x: (x['Tax Liability'].sum() / x['amount'].sum() * 100) if x['amount'].sum() != 0 else 0)
+                        st.line_chart(trend_data)
+
+                    # --- SEARCH & OVERRIDE ---
+                    st.divider()
+                    st.subheader("🔎 Database Audit & Manual Override")
+                    c_s1, c_s2 = st.columns(2)
+                    s_name = c_s1.text_input("Search Cardholder", "")
+                    s_id = c_s2.text_input("Search Trans ID", "")
+
+                    f_search_df = filtered_period_df.copy()
+                    if s_name:
+                        f_search_df = f_search_df[f_search_df['cardholder_name'].str.contains(s_name, case=False, na=False)]
+                    if s_id:
+                        f_search_df = f_search_df[f_search_df['trans_id'].str.contains(s_id, case=False, na=False)]
+
+                    with st.expander("🛠️ Edit Record Tax Status"):
+                        if not f_search_df.empty:
+                            target_id = st.selectbox("Select ID to Edit", f_search_df['trans_id'].unique())
+                            row_info = f_search_df[f_search_df['trans_id'] == target_id].iloc[0]
+                            st.info(f"ID: {target_id} | Name: {row_info['cardholder_name']} | Current: {'Taxable' if row_info['is_taxable'] else 'Nontaxable'}")
+                            if st.button("Toggle Status"):
+                                supabase.table("logs").update({"is_taxable": not row_info['is_taxable']}).eq("trans_id", target_id).execute()
+                                st.rerun()
+                        else:
+                            st.write("No matching records in the current period.")
+
+                    # --- FILING ---
+                    st.divider()
+                    st.subheader("📅 Filing Summary")
+                    hist_summary = filtered_period_df.groupby('Month').apply(lambda x: pd.Series({
+                        'Total Sales': x['amount'].sum(),
                         'Tax Liability': x['Tax Liability'].sum(),
-                        'Filing Status': "✅ Filed" if x.get('is_filed', pd.Series([False])).any() else "❌ Unfiled",
-                        'Date Filed': x.get('date_filed', pd.Series(["N/A"])).iloc[0]
+                        'Status': "✅ Filed" if x.get('is_filed', pd.Series([False])).any() else "❌ Pending"
                     }), include_groups=False)
-                    st.dataframe(hist_summary.style.format({'Total Amount': "${:,.2f}", 'Tax Liability': "${:,.2f}"}), use_container_width=True)
+                    st.dataframe(hist_summary.style.format({'Total Sales': "${:,.2f}", 'Tax Liability': "${:,.2f}"}), use_container_width=True)
 
-                    # --- DOWNLOAD ---
-                    csv = admin_df.to_csv(index=False).encode('utf-8')
-                    st.download_button("📥 Download Audit Report", data=csv, file_name='tax_audit.csv', mime='text/csv')
+                    csv = filtered_period_df.to_csv(index=False).encode('utf-8')
+                    st.download_button("📥 Export Period Audit Log", data=csv, file_name=f'audit_{date_range[0]}_{date_range[1]}.csv', mime='text/csv')
                 else:
                     st.info("No records found.")
             except Exception as e:
