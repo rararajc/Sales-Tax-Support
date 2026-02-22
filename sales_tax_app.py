@@ -76,11 +76,14 @@ else:
                     lambda x: x['Amount'] * -1 if str(x['Status']).lower() == 'voided' else x['Amount'], axis=1
                 )
 
-                # Taxable Logic: Decimal OR Whole > 4000
-                main_df['is_taxable'] = main_df['Amount'].abs().apply(lambda x: (x % 1 != 0) or (x > 4000))
+                # --- UPDATED TAXABLE LOGIC ---
+                # Nontaxable = Whole number AND <= 4000. 
+                # Taxable = Has decimals OR is whole number > 4000.
+                main_df['is_taxable'] = main_df['Amount'].abs().apply(
+                    lambda x: (x % 1 != 0) or (x > 4000)
+                )
 
-                # --- NEW REVERSE TAX CALCULATION ---
-                # If taxable: Pre-tax = Total / (1 + rate). If not: Pre-tax = Total.
+                # Reverse Tax Calculation
                 main_df['Taxable Sales Before Tax'] = main_df.apply(
                     lambda x: x['Amount'] / (1 + tax_rate) if x['is_taxable'] else 0, axis=1
                 )
@@ -134,7 +137,7 @@ else:
                     admin_df['date_field'] = pd.to_datetime(admin_df['date_field'])
                     admin_df['Month'] = admin_df['date_field'].dt.to_period('M').astype(str)
 
-                    # Re-calculate the columns for historical data based on current tax rate
+                    # Re-calculate based on historical "is_taxable" flag saved in DB
                     admin_df['Taxable Sales Before Tax'] = admin_df.apply(
                         lambda x: x['amount'] / (1 + tax_rate) if x['is_taxable'] else 0, axis=1
                     )
@@ -155,14 +158,12 @@ else:
                         'Total Fees': x['fee'].sum()
                     }))
 
-                    # YTD Row calculation
                     ytd_totals = hist_summary.sum().to_frame().T
                     ytd_totals.index = ['TOTAL (YTD)']
 
                     final_display = pd.concat([hist_summary, ytd_totals])
                     st.dataframe(final_display.style.format("${:,.2f}"))
 
-                    # Visuals and Export
                     st.subheader("📊 Sales Tax Liability Trend")
                     st.bar_chart(hist_summary[['Sales Tax (B)']])
 
