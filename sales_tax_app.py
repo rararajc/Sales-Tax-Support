@@ -85,4 +85,97 @@ else:
                                 final_date_filed = None
 
                             rows.append({
-                                "trans_id": tid,
+                                "trans_id": tid, "username": st.session_state.username, "date_field": r["Date"].strftime('%Y-%m-%d'),
+                                "cardholder_name": str(r.get("Cardholder Name", "N/A")), "type": str(r["Type"]), "status": str(r["Status"]),
+                                "amount": float(r["Amount"]), "fee": float(r.get("Fee", 0)), "is_taxable": final_is_taxable,
+                                "is_filed": final_is_filed, "date_filed": final_date_filed
+                            })
+                        supabase.table("logs").upsert(rows, on_conflict="trans_id").execute()
+                        st.success("Database updated!")
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    # --- TAB 2: ADMIN RECORDS & FILING ---
+    with tab2:
+        try:
+            res = supabase.table("logs").select("*").order("date_field", desc=True).execute()
+            if res.data:
+                all_df = pd.DataFrame(res.data)
+                for col in ['is_filed', 'date_filed']:
+                    if col not in all_df.columns: all_df[col] = None
+                
+                all_df['date_field'] = pd.to_datetime(all_df['date_field'])
+                all_df['Month'] = all_df['date_field'].dt.to_period('M').astype(str)
+
+                # Calculations
+                all_df['Taxable Sales Before Tax'] = all_df.apply(lambda x: x['amount'] / (1 + tax_rate) if x['is_taxable'] else 0, axis=1)
+                all_df['Nontaxable Sales'] = all_df.apply(lambda x: x['amount'] if not x['is_taxable'] else 0, axis=1)
+                all_df['Total Tax (B)'] = all_df['Taxable Sales Before Tax'] * tax_rate
+                
+                # 1. SUMMARY
+                st.header("📅 Monthly Sales Tax Summary")
+                summary = all_df.groupby('Month').agg({'Taxable Sales Before Tax': 'sum', 'Nontaxable Sales': 'sum', 'Total Tax (B)': 'sum'})
+                summary['Grand Total Sales (A)'] = summary['Taxable Sales Before Tax'] + summary['Nontaxable Sales']
+                summary['A + B'] = summary['Grand Total Sales (A)'] + summary['Total Tax (B)']
+                st.dataframe(summary.style.format("${:,.2f}"), use_container_width=True)
+
+                # 2. FILING TRACKER (DATES CAN BE ALTERED)
+                st.divider()
+                st.subheader("📝 Filing Tracker")
+                filing_summary = all_df.groupby('Month').agg({'is_filed': 'max', 'date_filed': 'max'}).reset_index()
+
+                for _, f_row in filing_summary.iterrows():
+                    m = f_row['Month']
+                    is_f = bool(f_row['is_filed'])
+                    
+                    # Robust Date Logic
+                    raw_date = f_row['date_filed']
+                    if isinstance(raw_date, str) and raw_date not in ['None', 'nan', '']:
+                        try:
+                            current_d = datetime.strptime(raw_date, '%Y-%m-%d').date()
+                        except:
+                            current_d = datetime.now().date()
+                    else:
+                        current_d = datetime.now().date()
+                    
+                    c1, c2, c3, c4, c5 = st.columns([1, 1, 1.5, 1, 1])
+                    c1.write(f"**{m}**")
+                    c2.write("✅ Filed" if is_f else "❌ Not Filed")
+                    
+                    # This allows alteration of filing date
+                    selected_date = c3.date_input("Filing Date", value=current_d, key=f"date_{m}", label_visibility="collapsed")
+                    
+                    if not is_f:
+                        if c4.button(f"Mark Filed", key=f"f_{m}"):
+                            supabase.table("logs").update({"is_filed": True, "date_filed": selected_date.strftime('%Y-%m-%d')}).filter("date_field", "gte", f"{m}-01").filter("date_field", "lte", f"{m}-31").execute()
+                            st.rerun()
+                    else:
+                        if c4.button(f"Update Date", key=f"up_{m}"):
+                            supabase.table("logs").update({"date_filed": selected_date.strftime('%Y-%m-%d')}).filter("date_field", "gte", f"{m}-01").filter("date_field", "lte", f"{m}-31").execute()
+                            st.success(f"Date updated for {m}")
+                            st.rerun()
+                        if c5.button(f"Unmark", key=f"u_{m}"):
+                            supabase.table("logs").update({"is_filed": False, "date_filed": None}).filter("date_field", "gte", f"{m}-01").filter("date_field", "lte", f"{m}-31").execute()
+                            st.rerun()
+
+                # 3. ITEMIZED & OVERRIDE
+                st.divider()
+                st.subheader("📋 Itemized Sales & Override")
+                s_query = st.text_input("Search Cardholder / ID")
+                audit_df = all_df.copy()
+                if s_query:
+                    audit_df = audit_df[(audit_df['cardholder_name'].str.contains(s_query, case=False)) | (audit_df['trans_id'].str.contains(s_query))]
+                
+                audit_df['Category'] = audit_df['is_taxable'].map({True: "Taxable", False: "Nontaxable"})
+                st.dataframe(audit_df[['date_field', 'trans_id', 'cardholder_name', 'amount', 'Category', 'Total Tax (B)', 'is_filed', 'date_filed']].style.format({'amount': "${:,.2f}", 'Total Tax (B)': "${:,.2f}"}), use_container_width=True, hide_index=True)
+
+                with st.expander("🛠️ Manual Tax Classification Override"):
+                    target_id = st.selectbox("Select ID to Flip Status", audit_df['trans_id'].unique())
+                    if st.button("Flip Taxable/Nontaxable Status"):
+                        curr_is_taxable = audit_df[audit_df['trans_id'] == target_id]['is_taxable'].iloc[0]
+                        supabase.table("logs").update({"is_taxable": not curr_is_taxable}).eq("trans_id", target_id).execute()
+                        st.rerun()
+            else:
+                st.info("No records found.")
+        except Exception as e:
+            st.error(f"Error: {e}")
