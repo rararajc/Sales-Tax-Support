@@ -77,10 +77,10 @@ else:
                 )
 
                 # --- UPDATED TAXABLE LOGIC ---
-                # Nontaxable = Whole number AND <= 4000. 
-                # Taxable = Has decimals OR is whole number > 4000.
+                # Nontaxable = Whole number AND <= 2000. 
+                # Taxable = Has decimals OR is whole number > 2000.
                 main_df['is_taxable'] = main_df['Amount'].abs().apply(
-                    lambda x: (x % 1 != 0) or (x > 4000)
+                    lambda x: (x % 1 != 0) or (x > 2000)
                 )
 
                 # Reverse Tax Calculation
@@ -173,3 +173,4 @@ else:
                     st.info("No records found.")
             except Exception as e:
                 st.error(f"Database Error: {e}")
+
