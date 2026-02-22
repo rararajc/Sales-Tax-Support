@@ -55,6 +55,7 @@ else:
 
         if uploaded_file:
             try:
+                # Load data
                 if uploaded_file.name.endswith('.csv'):
                     df = pd.read_csv(uploaded_file, sep=None, engine='python')
                 else:
@@ -62,14 +63,18 @@ else:
                 
                 df.columns = [str(c).strip() for c in df.columns] 
                 
-                # --- DATA CLEANING (Fixes TypeError) ---
+                # --- DATA CLEANING (Handles Accounting Formats & Currency) ---
                 for col in ['Amount', 'Fee']:
                     if col in df.columns:
-                        # Remove symbols, handle strings, and convert to float
+                        # 1. Convert to string and clean whitespace
+                        df[col] = df[col].astype(str).str.strip()
+                        # 2. Handle parentheses (46.63) -> -46.63
+                        df[col] = df[col].str.replace(r'\((.*)\)', r'-\1', regex=True)
+                        # 3. Remove currency symbols, commas, and convert to float
                         df[col] = (
-                            df[col].astype(str)
+                            df[col]
                             .str.replace(r'[\$,\s]', '', regex=True)
-                            .replace(['nan', 'None', ''], '0')
+                            .replace(['nan', 'None', '', '-'], '0')
                             .astype(float)
                         )
 
@@ -97,19 +102,20 @@ else:
                     main_df['is_taxable'] = main_df['Amount'].abs().apply(lambda x: (x % 1 != 0) or (x > 2000))
                     main_df['Category'] = main_df['is_taxable'].map({True: "Taxable", False: "Nontaxable"})
                     
-                    # Reverse Calculations
+                    # Calculations
                     main_df['Taxable Sales Before Tax'] = main_df.apply(lambda x: x['Amount'] / (1 + tax_rate) if x['is_taxable'] else 0, axis=1)
                     main_df['Nontaxable Sales'] = main_df.apply(lambda x: x['Amount'] if not x['is_taxable'] else 0, axis=1)
                     main_df['Calculated Tax'] = main_df['Taxable Sales Before Tax'] * tax_rate
 
                     # --- DISPLAY: ITEMIZED BREAKDOWN ---
                     st.subheader("🔍 Itemized Tax Identification")
+                    st.write("Review how each transaction was categorized before saving.")
                     st.dataframe(main_df[['Date', 'Trans ID', 'Amount', 'Category', 'Taxable Sales Before Tax', 'Nontaxable Sales', 'Calculated Tax']].style.format({
                         'Amount': "${:,.2f}", 'Taxable Sales Before Tax': "${:,.2f}", 'Nontaxable Sales': "${:,.2f}", 'Calculated Tax': "${:,.2f}"
                     }), use_container_width=True)
 
                     # --- DISPLAY: MONTHLY SUMMARY ---
-                    st.subheader("📋 Monthly Summary (Current File)")
+                    st.subheader("📋 Monthly Summary")
                     summary_data = main_df.groupby('Month').apply(lambda x: pd.Series({
                         'Taxable Sales (Pre-Tax)': x['Taxable Sales Before Tax'].sum(),
                         'Nontaxable Sales': x['Nontaxable Sales'].sum(),
@@ -119,7 +125,7 @@ else:
                     }), include_groups=False).reset_index().set_index('Month')
                     st.dataframe(summary_data.style.format("${:,.2f}"), use_container_width=True)
 
-                    if st.button("🚀 Save/Update Records to Database"):
+                    if st.button("🚀 Sync to Database (Upsert)"):
                         rows = []
                         for _, row in main_df.iterrows():
                             rows.append({
@@ -134,9 +140,9 @@ else:
                                 "is_taxable": bool(row["is_taxable"])
                             })
                         try:
-                            # upsert handles duplicate prevention via on_conflict
+                            # Upsert prevents duplicates by updating existing trans_id matches
                             supabase.table("logs").upsert(rows, on_conflict="trans_id").execute()
-                            st.success("Database synchronized! Duplicates updated automatically.")
+                            st.success("Database synchronized successfully!")
                         except Exception as e:
                             st.error(f"Database Error: {e}")
             except Exception as e:
@@ -145,7 +151,7 @@ else:
     # --- TAB 2: ADMIN RECORDS & FILING ---
     if tab2 is not None:
         with tab2:
-            st.header("📊 Historical Records & Filing")
+            st.header("📊 Historical Database & Filing")
             try:
                 res = supabase.table("logs").select("*").order("date_field", desc=True).execute()
                 if res.data:
@@ -153,33 +159,33 @@ else:
                     admin_df['date_field'] = pd.to_datetime(admin_df['date_field'])
                     admin_df['Month'] = admin_df['date_field'].dt.to_period('M').astype(str)
                     
-                    # Calculations for Historical Data
+                    # Apply calculations based on DB flag
                     admin_df['Taxable Sales'] = admin_df.apply(lambda x: x['amount'] / (1 + tax_rate) if x['is_taxable'] else 0, axis=1)
                     admin_df['Tax Liability'] = admin_df['Taxable Sales'] * tax_rate
 
-                    # --- FILING ACTIONS ---
+                    # --- FILING FORM ---
                     st.subheader("📅 Mark Month as Filed")
                     c1, c2, c3 = st.columns(3)
                     avail_months = sorted(admin_df['Month'].unique(), reverse=True)
-                    target_month = c1.selectbox("Select Month to File", avail_months)
-                    file_date = c2.date_input("Date of Filing", datetime.now())
+                    target_month = c1.selectbox("Select Month", avail_months)
+                    file_date = c2.date_input("Filing Date", datetime.now())
                     
-                    if c3.button("Confirm Filing"):
+                    if c3.button("Confirm Filing Status"):
                         try:
-                            # Filter based on the selected month string (YYYY-MM)
+                            # Updates all rows within that month's date range
                             supabase.table("logs").update({
                                 "is_filed": True, 
                                 "date_filed": file_date.strftime('%Y-%m-%d')
                             }).filter("date_field", "gte", f"{target_month}-01")\
                               .filter("date_field", "lte", f"{target_month}-31").execute()
-                            st.success(f"Updated {target_month} as Filed!")
+                            st.success(f"Records for {target_month} updated!")
                             st.rerun()
                         except Exception as e:
-                            st.error(f"Filing Update Error: {e}")
+                            st.error(f"Update Error: {e} (Check if 'is_filed' column exists)")
 
                     st.divider()
 
-                    # --- FINANCIAL OVERVIEW TABLE ---
+                    # --- FINANCIAL SUMMARY ---
                     st.subheader("📈 Financial Overview")
                     hist_summary = admin_df.groupby('Month').apply(lambda x: pd.Series({
                         'Total Amount': x['amount'].sum(),
@@ -187,12 +193,12 @@ else:
                         'Filing Status': "✅ Filed" if x.get('is_filed', pd.Series([False])).any() else "❌ Unfiled",
                         'Date Filed': x.get('date_filed', pd.Series(["N/A"])).iloc[0]
                     }), include_groups=False)
-                    st.dataframe(hist_summary.style.format({'Total Amount': "${:,.2f}", 'Tax Liability': "${:,.2f}"}))
+                    st.dataframe(hist_summary.style.format({'Total Amount': "${:,.2f}", 'Tax Liability': "${:,.2f}"}), use_container_width=True)
 
-                    # --- EXPORT ---
+                    # --- DOWNLOAD ---
                     csv = admin_df.to_csv(index=False).encode('utf-8')
-                    st.download_button("📥 Download Full Audit Log", data=csv, file_name='tax_audit_log.csv', mime='text/csv')
+                    st.download_button("📥 Download Audit Report", data=csv, file_name='tax_audit.csv', mime='text/csv')
                 else:
-                    st.info("No records found in database.")
+                    st.info("No records found.")
             except Exception as e:
                 st.error(f"Database Error: {e}")
