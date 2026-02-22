@@ -4,7 +4,6 @@ from supabase import create_client, Client
 from io import BytesIO
 
 # --- DB CONNECTION ---
-# These must be set in your Streamlit Cloud Secrets
 URL = st.secrets["SUPABASE_URL"]
 KEY = st.secrets["SUPABASE_KEY"]
 supabase: Client = create_client(URL, KEY)
@@ -43,7 +42,6 @@ else:
         st.session_state.logged_in = False
         st.rerun()
 
-    # --- TAB STABILIZATION LOGIC ---
     if st.session_state.role == "admin":
         tab1, tab2 = st.tabs(["📤 Upload & Process", "📊 Admin Records"])
     else:
@@ -59,11 +57,9 @@ else:
             df = pd.read_excel(uploaded_file)
             df.columns = [str(c).strip() for c in df.columns] 
             
-            # Excel-level deduplication
             if 'Trans ID' in df.columns:
                 df = df.drop_duplicates(subset=['Trans ID'])
 
-            # Filter for Funded and Voided Sales
             valid_statuses = ['funded', 'voided']
             main_df = df[(df['Status'].astype(str).str.lower().isin(valid_statuses)) & 
                          (df['Type'].astype(str).str.lower() == 'sale')].copy()
@@ -73,8 +69,6 @@ else:
             else:
                 main_df['Date'] = pd.to_datetime(main_df['Date'])
                 main_df['Month'] = main_df['Date'].dt.to_period('M').astype(str)
-                
-                # Fee Reversal Logic
                 main_df['Fee'] = main_df['Fee'] * -1
                 
                 # Void Netting Logic
@@ -85,13 +79,25 @@ else:
                 # Taxable Logic: Decimal OR Whole > 4000
                 main_df['is_taxable'] = main_df['Amount'].abs().apply(lambda x: (x % 1 != 0) or (x > 4000))
 
+                # --- NEW REVERSE TAX CALCULATION ---
+                # If taxable: Pre-tax = Total / (1 + rate). If not: Pre-tax = Total.
+                main_df['Taxable Sales Before Tax'] = main_df.apply(
+                    lambda x: x['Amount'] / (1 + tax_rate) if x['is_taxable'] else 0, axis=1
+                )
+                main_df['Nontaxable Sales'] = main_df.apply(
+                    lambda x: x['Amount'] if not x['is_taxable'] else 0, axis=1
+                )
+                main_df['Sales Tax (B)'] = main_df['Taxable Sales Before Tax'] * tax_rate
+
                 st.subheader("📋 Monthly Summary (Current File)")
+                
                 summary_data = main_df.groupby('Month').apply(lambda x: pd.Series({
-                    'Taxable Sales': x[x['is_taxable'] == True]['Amount'].sum(),
-                    'Nontaxable Sales': x[x['is_taxable'] == False]['Amount'].sum(),
-                    'Grand Total Sales (A)': x['Amount'].sum(),
-                    'Sales Tax (B)': x[x['is_taxable'] == True]['Amount'].sum() * tax_rate,
-                    'A+B': x['Amount'].sum() + (x[x['is_taxable'] == True]['Amount'].sum() * tax_rate),
+                    'Taxable Sales Before Tax': x['Taxable Sales Before Tax'].sum(),
+                    'Nontaxable Sales': x['Nontaxable Sales'].sum(),
+                    'Grand Total Sales Before Tax (A)': x['Taxable Sales Before Tax'].sum() + x['Nontaxable Sales'].sum(),
+                    'Sales Tax (B)': x['Sales Tax (B)'].sum(),
+                    'A+B': (x['Taxable Sales Before Tax'].sum() + x['Nontaxable Sales'].sum()) + x['Sales Tax (B)'].sum(),
+                    'Sum of Amount per Excel': x['Amount'].sum(),
                     'Total Fees': x['Fee'].sum()
                 })).reset_index().set_index('Month')
                 
@@ -112,7 +118,6 @@ else:
                             "is_taxable": bool(row["is_taxable"])
                         })
                     try:
-                        # Upsert prevents duplication on trans_id
                         supabase.table("logs").upsert(rows, on_conflict="trans_id").execute()
                         st.success("Database synchronized successfully!")
                     except Exception as e:
@@ -129,47 +134,41 @@ else:
                     admin_df['date_field'] = pd.to_datetime(admin_df['date_field'])
                     admin_df['Month'] = admin_df['date_field'].dt.to_period('M').astype(str)
 
+                    # Re-calculate the columns for historical data based on current tax rate
+                    admin_df['Taxable Sales Before Tax'] = admin_df.apply(
+                        lambda x: x['amount'] / (1 + tax_rate) if x['is_taxable'] else 0, axis=1
+                    )
+                    admin_df['Nontaxable Sales'] = admin_df.apply(
+                        lambda x: x['amount'] if not x['is_taxable'] else 0, axis=1
+                    )
+                    admin_df['Sales Tax (B)'] = admin_df['Taxable Sales Before Tax'] * tax_rate
+
                     st.subheader(f"📈 Accumulated Totals (at {tax_rate_input}%)")
                     
                     hist_summary = admin_df.groupby('Month').apply(lambda x: pd.Series({
-                        'Taxable Sales': x[x['is_taxable'] == True]['amount'].sum(),
-                        'Nontaxable Sales': x[x['is_taxable'] == False]['amount'].sum(),
-                        'Grand Total Sales (A)': x['amount'].sum(),
-                        'Sales Tax (B)': x[x['is_taxable'] == True]['amount'].sum() * tax_rate,
-                        'A+B': x['amount'].sum() + (x[x['is_taxable'] == True]['amount'].sum() * tax_rate),
+                        'Taxable Sales Before Tax': x['Taxable Sales Before Tax'].sum(),
+                        'Nontaxable Sales': x['Nontaxable Sales'].sum(),
+                        'Grand Total Sales Before Tax (A)': x['Taxable Sales Before Tax'].sum() + x['Nontaxable Sales'].sum(),
+                        'Sales Tax (B)': x['Sales Tax (B)'].sum(),
+                        'A+B': (x['Taxable Sales Before Tax'].sum() + x['Nontaxable Sales'].sum()) + x['Sales Tax (B)'].sum(),
+                        'Sum of Amount per Excel': x['amount'].sum(),
                         'Total Fees': x['fee'].sum()
                     }))
 
-                    # YTD Row
-                    ytd = pd.DataFrame({
-                        'Taxable Sales': [hist_summary['Taxable Sales'].sum()],
-                        'Nontaxable Sales': [hist_summary['Nontaxable Sales'].sum()],
-                        'Grand Total Sales (A)': [hist_summary['Grand Total Sales (A)'].sum()],
-                        'Sales Tax (B)': [hist_summary['Sales Tax (B)'].sum()],
-                        'A+B': [hist_summary['A+B'].sum()],
-                        'Total Fees': [hist_summary['Total Fees'].sum()]
-                    }, index=['TOTAL (YTD)'])
+                    # YTD Row calculation
+                    ytd_totals = hist_summary.sum().to_frame().T
+                    ytd_totals.index = ['TOTAL (YTD)']
 
-                    final_display = pd.concat([hist_summary, ytd])
+                    final_display = pd.concat([hist_summary, ytd_totals])
                     st.dataframe(final_display.style.format("${:,.2f}"))
 
-                    # --- VISUALS ---
+                    # Visuals and Export
                     st.subheader("📊 Sales Tax Liability Trend")
-                    chart_data = hist_summary[['Sales Tax (B)']].copy()
-                    st.bar_chart(chart_data)
+                    st.bar_chart(hist_summary[['Sales Tax (B)']])
 
-                    # --- EXPORT ---
                     csv = final_display.to_csv().encode('utf-8')
-                    st.download_button(
-                        label="📥 Download Accumulated Report as CSV",
-                        data=csv,
-                        file_name='historical_sales_tax_report.csv',
-                        mime='text/csv',
-                    )
-
-                    st.subheader("📝 Detailed Transaction Logs")
-                    st.dataframe(admin_df[["trans_id", "date_field", "cardholder_name", "status", "amount", "fee", "is_taxable"]])
+                    st.download_button(label="📥 Download Accumulated Report", data=csv, file_name='tax_report.csv', mime='text/csv')
                 else:
-                    st.info("No records found in database.")
+                    st.info("No records found.")
             except Exception as e:
                 st.error(f"Database Error: {e}")
