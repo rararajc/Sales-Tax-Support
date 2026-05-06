@@ -2,8 +2,8 @@ name: Total App Heartbeat
 
 on:
   schedule:
-    - cron: '0 */12 * * *' # Runs every 12 hours
-  workflow_dispatch:      # Allows you to click a button to test manually
+    - cron: '0 */12 * * *'
+  workflow_dispatch:
 
 jobs:
   keep_alive:
@@ -11,18 +11,21 @@ jobs:
     permissions:
       contents: write
     steps:
-      # --- TASK 1: CHECKOUT THE CODE ---
       - name: Checkout Repo
         uses: actions/checkout@v4
 
-      # --- TASK 2: POKE SUPABASE (Keeps Database Active) ---
+      - name: Debug Secret Check
+        run: |
+          if [ -z "${{ secrets.SUPABASE_URL }}" ]; then echo "URL is MISSING"; exit 1; fi
+          if [ -z "${{ secrets.SUPABASE_KEY }}" ]; then echo "KEY is MISSING"; exit 1; fi
+          echo "Secrets are present, proceeding..."
+
       - name: Ping Supabase API
         run: |
-          curl -X GET "${{ secrets.SUPABASE_URL }}/rest/v1/user?select=id&limit=1" \
+          curl -v -X GET "${{ secrets.SUPABASE_URL }}/rest/v1/user?select=id&limit=1" \
           -H "apikey: ${{ secrets.SUPABASE_KEY }}" \
           -H "Authorization: Bearer ${{ secrets.SUPABASE_KEY }}"
 
-      # --- TASK 3: EMPTY COMMIT (Keeps Streamlit Website Active) ---
       - name: Push Empty Commit
         run: |
           git config --global user.name "GitHub Actions"
