@@ -1,0 +1,31 @@
+name: Total App Heartbeat
+
+on:
+  schedule:
+    - cron: '0 */12 * * *' # Runs every 12 hours
+  workflow_dispatch:      # Allows you to click a button to test manually
+
+jobs:
+  keep_alive:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # --- TASK 1: CHECKOUT THE CODE ---
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      # --- TASK 2: POKE SUPABASE (Keeps Database Active) ---
+      - name: Ping Supabase API
+        run: |
+          curl -X GET "${{ secrets.SUPABASE_URL }}/rest/v1/user?select=id&limit=1" \
+          -H "apikey: ${{ secrets.SUPABASE_KEY }}" \
+          -H "Authorization: Bearer ${{ secrets.SUPABASE_KEY }}"
+
+      # --- TASK 3: EMPTY COMMIT (Keeps Streamlit Website Active) ---
+      - name: Push Empty Commit
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git commit --allow-empty -m "Heartbeat: Resetting Streamlit and Supabase timers"
+          git push
