@@ -8,40 +8,26 @@ on:
 jobs:
   keep_alive:
     runs-on: ubuntu-latest
-    
-    # CRITICAL: This allows the "Push" to work
     permissions:
       contents: write
       
     steps:
-      # --- STEP 1: GET THE CODE ---
       - name: Checkout Repo
         uses: actions/checkout@v4
 
-      # --- STEP 2: POKE SUPABASE (Keeps Database Active) ---
+      # --- TASK 2: POKE SUPABASE ---
       - name: Ping Supabase API
         run: |
-          # 1. Clean the URL (removes any accidental trailing slashes)
-          CLEAN_URL=$(echo "${{ secrets.SUPABASE_URL }}" | sed 's:/*$::')
-          
-          # 2. Add https:// if it is missing
-          if [[ ! $CLEAN_URL =~ ^https?:// ]]; then
-            CLEAN_URL="https://$CLEAN_URL"
-          fi
-          
-          echo "Pinging: $CLEAN_URL"
-          
-          # 3. Perform the actual API call
-          curl -f -v -X GET "$CLEAN_URL/rest/v1/user?select=id&limit=1" \
+          # We use "users" (plural) to match your database
+          curl -f -v -X GET "${{ secrets.SUPABASE_URL }}/rest/v1/users?select=id&limit=1" \
           -H "apikey: ${{ secrets.SUPABASE_KEY }}" \
-          -H "Authorization: Bearer ${{ secrets.SUPABASE_KEY }}"
+          -H "Authorization: Bearer ${{ secrets.SUPABASE_KEY }}" \
+          -H "User-Agent: Mozilla/5.0"
 
-      # --- STEP 3: EMPTY COMMIT (Keeps Streamlit Website Active) ---
+      # --- TASK 3: EMPTY COMMIT ---
       - name: Push Empty Commit
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          
-          # This creates a "fake" update that resets the Streamlit 12-hour timer
           git commit --allow-empty -m "Heartbeat: Resetting Streamlit and Supabase timers"
           git push
