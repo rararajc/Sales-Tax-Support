@@ -14,11 +14,11 @@ jobs:
       - name: Checkout Repo
         uses: actions/checkout@v4
 
-      - name: Debug Secret Check
+      # This step checks if GitHub can actually see your secrets
+      - name: Verify Secrets Exist
         run: |
-          if [ -z "${{ secrets.SUPABASE_URL }}" ]; then echo "URL is MISSING"; exit 1; fi
-          if [ -z "${{ secrets.SUPABASE_KEY }}" ]; then echo "KEY is MISSING"; exit 1; fi
-          echo "Secrets are present, proceeding..."
+          if [ -z "${{ secrets.SUPABASE_URL }}" ]; then echo "ERROR: SUPABASE_URL is empty"; exit 1; fi
+          if [ -z "${{ secrets.SUPABASE_KEY }}" ]; then echo "ERROR: SUPABASE_KEY is empty"; exit 1; fi
 
       - name: Ping Supabase API
         run: |
