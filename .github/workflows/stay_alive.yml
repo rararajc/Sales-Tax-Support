@@ -18,8 +18,8 @@ jobs:
       # --- TASK 2: POKE SUPABASE ---
       - name: Ping Supabase API
         run: |
-          # We use "users" (plural) to match your database
-          curl -f -v -X GET "${{ secrets.SUPABASE_URL }}/rest/v1/users?select=id&limit=1" \
+          # We use select=* so it doesn't matter what your column names are
+          curl -f -v -X GET "${{ secrets.SUPABASE_URL }}/rest/v1/users?select=*&limit=1" \
           -H "apikey: ${{ secrets.SUPABASE_KEY }}" \
           -H "Authorization: Bearer ${{ secrets.SUPABASE_KEY }}" \
           -H "User-Agent: Mozilla/5.0"
