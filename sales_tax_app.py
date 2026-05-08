@@ -2,6 +2,13 @@ import streamlit as st
 import pandas as pd
 from supabase import create_client, Client
 from datetime import datetime
+import calendar
+
+def get_last_day(month_str):
+    # month_str is like "2026-04"
+    year, month = map(int, month_str.split("-"))
+    last_day = calendar.monthrange(year, month)[1]
+    return f"{month_str}-{last_day}"
 
 # --- DB CONNECTION ---
 URL = st.secrets["SUPABASE_URL"]
@@ -148,15 +155,15 @@ else:
                     
                     if not is_f:
                         if c4.button(f"Mark Filed", key=f"f_{m}"):
-                            supabase.table("logs").update({"is_filed": True, "date_filed": selected_date.strftime('%Y-%m-%d')}).filter("date_field", "gte", f"{m}-01").filter("date_field", "lte", f"{m}-31").execute()
+                            supabase.table("logs").update({"is_filed": True, "date_filed": selected_date.strftime('%Y-%m-%d')}).filter("date_field", "gte", f"{m}-01").filter("date_field", "lte", get_last_day(m)).execute()
                             st.rerun()
                     else:
                         if c4.button(f"Update Date", key=f"up_{m}"):
-                            supabase.table("logs").update({"date_filed": selected_date.strftime('%Y-%m-%d')}).filter("date_field", "gte", f"{m}-01").filter("date_field", "lte", f"{m}-31").execute()
+                            supabase.table("logs").update({"date_filed": selected_date.strftime('%Y-%m-%d')}).filter("date_field", "gte", f"{m}-01").filter("date_field", "lte", get_last_day(m)).execute()
                             st.success(f"Date updated!")
                             st.rerun()
                         if c5.button(f"Unmark", key=f"u_{m}"):
-                            supabase.table("logs").update({"is_filed": False, "date_filed": None}).filter("date_field", "gte", f"{m}-01").filter("date_field", "lte", f"{m}-31").execute()
+                            supabase.table("logs").update({"is_filed": False, "date_filed": None}).filter("date_field", "gte", f"{m}-01").filter("date_field", "lte", get_last_day(m)).execute()
                             st.rerun()
 
                 # 3. BULK DELETE SECTION
@@ -168,7 +175,7 @@ else:
                     count_to_del = len(all_df[all_df['Month'] == del_month])
                     st.warning(f"This will delete all {count_to_del} records for {del_month}. This cannot be undone.")
                     if st.button(f"Confirm Delete All {del_month} Records"):
-                        supabase.table("logs").delete().filter("date_field", "gte", f"{del_month}-01").filter("date_field", "lte", f"{del_month}-31").execute()
+                        supabase.table("logs").delete().filter("date_field", "gte", f"{del_month}-01").filter("date_field", "lte", get_last_day(del_month)).execute()
                         st.success(f"Deleted records for {del_month}")
                         st.rerun()
 
